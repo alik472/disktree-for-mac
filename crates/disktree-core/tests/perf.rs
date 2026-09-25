@@ -170,7 +170,7 @@ fn reordering_a_real_scan_is_quick() {
         .or_else(|| std::env::var_os("HOME"))
         .map(std::path::PathBuf::from)
         .unwrap();
-    let tree = timed("scan", Duration::from_secs(600), || {
+    let tree = timed("scan", Duration::from_mins(10), || {
         scan(&root, ScanOptions::default()).unwrap()
     });
     eprintln!("entries: {}", count(&tree));
