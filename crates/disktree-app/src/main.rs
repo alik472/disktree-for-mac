@@ -20,8 +20,56 @@ use std::path::PathBuf;
 
 use anyhow::{Context as _, Result};
 use disktree_core::scan::ScanOptions;
-use gpui_kit::{AppContext as _, WindowOptions, px, size};
+use gpui_kit::{
+    App, AppContext as _, KeyBinding, Menu, MenuItem, WindowOptions, px, size,
+};
 use state::Disktree;
+
+mod menu {
+    #![allow(
+        clippy::derive_partial_eq_without_eq,
+        reason = "the derives come from gpui's actions! macro"
+    )]
+    gpui_kit::actions!(
+        disktree,
+        [Quit, CloseWindow, Hide, HideOthers, ShowAll]
+    );
+}
+use menu::{CloseWindow, Hide, HideOthers, Quit, ShowAll};
+
+/// The menu bar and the platform shortcuts that go with it. On macOS a window
+/// without them has no way to quit but the Dock; elsewhere they are
+/// harmless, since the keys are the platform modifier's.
+fn install_menus(cx: &mut App) {
+    cx.on_action(|_: &Quit, cx| cx.quit());
+    // One window: closing it is quitting, as it is for a macOS utility.
+    cx.on_action(|_: &CloseWindow, cx| cx.quit());
+    cx.on_action(|_: &Hide, cx| cx.hide());
+    cx.on_action(|_: &HideOthers, cx| cx.hide_other_apps());
+    cx.on_action(|_: &ShowAll, cx| cx.unhide_other_apps());
+    cx.bind_keys([
+        KeyBinding::new("cmd-q", Quit, None),
+        KeyBinding::new("cmd-w", CloseWindow, None),
+        KeyBinding::new("cmd-h", Hide, None),
+        KeyBinding::new("alt-cmd-h", HideOthers, None),
+    ]);
+    cx.set_menus([
+        Menu::new("disktree").items([
+            MenuItem::action("Hide disktree", Hide),
+            MenuItem::action("Hide Others", HideOthers),
+            MenuItem::action("Show All", ShowAll),
+            MenuItem::separator(),
+            MenuItem::action("Quit disktree", Quit),
+        ]),
+        Menu::new("Window").items([MenuItem::action("Close", CloseWindow)]),
+    ]);
+    cx.on_window_closed(|cx, _| {
+        if cx.windows().is_empty() {
+            cx.quit();
+        }
+    })
+    .detach();
+}
 
 /// What the command line asked for.
 #[derive(Debug)]
@@ -65,6 +113,7 @@ fn main() -> Result<()> {
         .with_assets(gpui_kit::assets::Assets)
         .run(move |cx| {
             gpui_omarchy::init(cx);
+            install_menus(cx);
             let options = args.options.clone();
             let root_for_app = root.clone();
             let window = cx

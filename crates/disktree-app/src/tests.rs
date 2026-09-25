@@ -1165,3 +1165,190 @@ fn marking_a_directory_marks_everything_inside_it(cx: &mut TestAppContext) {
     update(&view, cx, |app, cx| app.toggle_mark(&junk, cx));
     assert!(read(&view, cx, |app| app.marks.is_empty()));
 }
+
+/// Every interaction on a real, large scan, timed through the window harness.
+///
+/// Ignored by default: it scans `DISKTREE_PERF_ROOT` (the home directory when
+/// unset), which takes a minute on a busy machine. Run it with `make perf`.
+/// The budget is what a person notices: a key that takes longer than a few
+/// frames to redraw reads as the window freezing.
+#[gpui_kit::test]
+#[ignore = "performance: scans a real directory; run with `make perf`"]
+fn a_real_home_directory_stays_responsive(cx: &mut TestAppContext) {
+    use std::time::{Duration, Instant};
+
+    cx.update(gpui_omarchy::init);
+    let root = std::env::var_os("DISKTREE_PERF_ROOT")
+        .or_else(|| std::env::var_os("HOME"))
+        .map(std::path::PathBuf::from)
+        .expect("DISKTREE_PERF_ROOT or HOME");
+    let started = Instant::now();
+    let tree = scan(&root, ScanOptions::default()).expect("scan");
+    eprintln!(
+        "scanned {} ({} files) in {:.1}s",
+        root.display(),
+        tree.files,
+        started.elapsed().as_secs_f64()
+    );
+    let (view, cx) = cx.add_window_view(move |_, cx| {
+        Disktree::with_tree(root.clone(), tree, ScanOptions::default(), 3, cx)
+    });
+    let focus = view.read_with(cx, |app, _| app.focus.clone());
+    cx.update(|window, cx| window.focus(&focus, cx));
+
+    let budget = Duration::from_millis(100);
+    let mut worst = (Duration::ZERO, String::new());
+    let mut step = |cx: &mut Window, label: &str, keys: &str| {
+        let start = Instant::now();
+        if !keys.is_empty() {
+            cx.simulate_keystrokes(keys);
+        }
+        cx.run_until_parked();
+        draw(cx);
+        let took = start.elapsed();
+        eprintln!("{label:<30} {:>8.1} ms", took.as_secs_f64() * 1000.0);
+        if took > worst.0 {
+            worst = (took, label.to_string());
+        }
+    };
+
+    step(cx, "first frame", "");
+    step(cx, "second frame", "");
+    for (label, keys) in [
+        ("move right", "l"),
+        ("move down", "j"),
+        ("move left", "h"),
+        ("open selection", "enter"),
+        ("back up", "backspace"),
+        ("deeper (depth 4)", "]"),
+        ("deeper (depth 5)", "]"),
+        ("deeper (depth 6)", "]"),
+        ("shallower", "["),
+        ("shallower", "["),
+        ("shallower", "["),
+        ("zoom in", "="),
+        ("zoom out", "-"),
+        ("reset view", "0"),
+        ("mode: files", "t"),
+        ("files: move", "l"),
+        ("mode: age", "t"),
+        ("mode: size", "t"),
+        ("mode: files again", "t"),
+        ("mode: age again", "t"),
+        ("mode: size again", "t"),
+        ("next sibling", "tab"),
+        ("mark", "space"),
+        ("unmark", "space"),
+        ("open filter", "/"),
+    ] {
+        step(cx, label, keys);
+    }
+
+    // Typing must never wait for the search: each key redraws at once while
+    // the search of millions of names runs in the background.
+    for key in ["c", "a", "c", "h", "e"] {
+        let start = Instant::now();
+        // Straight to the window: the harness's own keystroke helper waits
+        // for background work, which would time the search, not the key.
+        cx.update(|window, cx| {
+            window.dispatch_keystroke(
+                gpui_kit::Keystroke::parse(key).expect("keystroke"),
+                cx,
+            );
+            window.draw(cx).clear(cx);
+        });
+        let took = start.elapsed();
+        eprintln!(
+            "{:<30} {:>8.1} ms",
+            format!("type \"{key}\""),
+            took.as_secs_f64() * 1000.0
+        );
+        assert!(took <= budget, "typing {key:?} took {took:?}");
+    }
+    let start = Instant::now();
+    cx.run_until_parked();
+    draw(cx);
+    let results = start.elapsed();
+    eprintln!(
+        "{:<30} {:>8.1} ms",
+        "filter results arrive",
+        results.as_secs_f64() * 1000.0
+    );
+    assert!(
+        results <= Duration::from_secs(3),
+        "filter results took {results:?}"
+    );
+
+    for (label, keys) in [
+        ("apply filter", "enter"),
+        ("clear filter", "escape"),
+        ("help", "?"),
+        ("close help", "escape"),
+    ] {
+        step(cx, label, keys);
+    }
+    eprintln!(
+        "worst: {} at {:.1} ms",
+        worst.1,
+        worst.0.as_secs_f64() * 1000.0
+    );
+    assert!(
+        worst.0 <= budget,
+        "{} took {:?}, over the {budget:?} budget",
+        worst.1,
+        worst.0
+    );
+}
+
+#[gpui_kit::test]
+fn command_letters_belong_to_the_menu_not_the_bare_key(
+    cx: &mut TestAppContext,
+) {
+    cx.update(gpui_omarchy::init);
+    let temp = fixture();
+    let (view, cx) = view_over(temp.path(), cx);
+    draw(cx);
+
+    // Mark something, so a stray `c` would open the review screen.
+    press(cx, "space");
+    assert!(!read(&view, cx, |app| app.marks.is_empty()));
+    press(cx, "cmd-c");
+    assert_eq!(read(&view, cx, |app| app.screen), Screen::Explore);
+    press(cx, "cmd-x");
+    assert!(
+        !read(&view, cx, |app| app.marks.is_empty()),
+        "cmd-x unmarked"
+    );
+
+    press(cx, "cmd-f");
+    assert!(
+        read(&view, cx, |app| app.find_open),
+        "cmd-f opens the filter"
+    );
+}
+
+#[gpui_kit::test]
+fn switching_to_files_keeps_the_selection_on_the_same_entry(
+    cx: &mut TestAppContext,
+) {
+    cx.update(gpui_omarchy::init);
+    let temp = fixture();
+    let (view, cx) = view_over(temp.path(), cx);
+    draw(cx);
+
+    let name = |view: &Entity<Disktree>, cx: &Window| {
+        read(view, cx, |app| {
+            let crumbs = app.selected.clone().expect("a selection");
+            app.tree
+                .as_ref()
+                .and_then(|tree| tree.resolve(&crumbs))
+                .map(|node| node.name.to_string())
+        })
+    };
+    let before = name(&view, cx);
+    press(cx, "t");
+    assert_eq!(read(&view, cx, Disktree::mode_index), 1, "files mode");
+    assert_eq!(name(&view, cx), before, "the selection moved");
+    press(cx, "t t");
+    assert_eq!(name(&view, cx), before);
+}

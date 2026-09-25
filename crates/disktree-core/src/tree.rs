@@ -180,12 +180,15 @@ impl Node {
     }
 
     /// Index of the largest child, used to pick a useful descent target.
-    pub const fn largest_child(&self) -> Option<usize> {
-        if self.children.is_empty() {
-            None
-        } else {
-            Some(0)
-        }
+    pub fn largest_child(&self, metric: Metric) -> Option<usize> {
+        // Children are sorted by the metric the scan used; after a metric
+        // switch they are not re-sorted, so rank here. Ties keep the first.
+        self.children
+            .iter()
+            .enumerate()
+            .rev()
+            .max_by_key(|(_, child)| child.value(metric))
+            .map(|(index, _)| index)
     }
 
     /// Depth of the deepest descendant.
@@ -381,8 +384,25 @@ mod tests {
         let mut root = Node::directory("root");
         root.children.push(leaf("big", 10));
         root.children.push(leaf("small", 1));
-        assert_eq!(root.largest_child(), Some(0));
-        assert_eq!(Node::directory("empty").largest_child(), None);
+        assert_eq!(root.largest_child(Metric::Bytes), Some(0));
+        assert_eq!(Node::directory("empty").largest_child(Metric::Bytes), None);
+    }
+
+    #[test]
+    fn largest_child_ranks_by_the_metric_asked_for() {
+        let mut root = Node::directory("root");
+        root.children.push(leaf("big", 10));
+        let mut many = Node::directory("many");
+        many.children.push(leaf("a", 1));
+        many.children.push(leaf("b", 1));
+        root.children.push(many);
+        aggregate(&mut root, Metric::Bytes);
+        let name = |metric| {
+            let index = root.largest_child(metric).unwrap();
+            root.children[index].name.to_string()
+        };
+        assert_eq!(name(Metric::Bytes), "big");
+        assert_eq!(name(Metric::Files), "many");
     }
 
     #[test]

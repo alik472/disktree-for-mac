@@ -615,13 +615,27 @@ impl Disktree {
         if self.selected.is_some() {
             return;
         }
-        if let Some(index) = self.current().and_then(Node::largest_child) {
+        if let Some(index) = self
+            .current()
+            .and_then(|node| node.largest_child(self.options.metric))
+        {
             self.selected = Some(vec![index]);
             cx.notify();
         }
     }
 
     // ── scanning ────────────────────────────────────────────────────────
+
+    /// Free a tree that is no longer shown. A home directory is millions of
+    /// nodes, and freeing them on the UI thread stalls the window for most of
+    /// a second on every rescan.
+    fn retire(tree: Option<Arc<Node>>, cx: &Context<'_, Self>) {
+        if let Some(tree) = tree {
+            cx.background_executor()
+                .spawn(async move { drop(tree) })
+                .detach();
+        }
+    }
 
     /// Start a fresh scan, abandoning any walk still in progress.
     pub fn start_scan(&mut self, cx: &mut Context<'_, Self>) {
@@ -632,7 +646,7 @@ impl Disktree {
         let epoch = self.scan_epoch;
         self.progress = ScanSnapshot::default();
         self.scan_error = None;
-        self.tree = None;
+        Self::retire(self.tree.take(), cx);
         self.crumbs.clear();
         self.selected = None;
         self.hovered = None;
@@ -702,7 +716,7 @@ impl Disktree {
                 }
                 let metric = self.options.metric;
                 self.marks.refresh(&self.root_path, &node, metric);
-                self.tree = Some(Arc::new(node));
+                Self::retire(self.tree.replace(Arc::new(node)), cx);
                 self.cache = None;
                 self.refresh_insights();
                 self.scan_elapsed =
@@ -951,7 +965,10 @@ impl Disktree {
                 }
             }
             // Nothing below the root is selected: the largest entry.
-            _ => match self.current().and_then(Node::largest_child) {
+            _ => match self
+                .current()
+                .and_then(|node| node.largest_child(self.options.metric))
+            {
                 Some(index) => {
                     let mut crumbs = self.crumbs.clone();
                     crumbs.push(index);
@@ -1633,20 +1650,14 @@ impl Disktree {
 
     pub fn toggle_metric(&mut self, cx: &mut Context<'_, Self>) {
         self.options.metric = self.options.metric.toggled();
+        // The tree keeps its order: every node already carries both bytes and
+        // files, and the layout, the sibling list and the largest child rank
+        // by the metric themselves. Re-sorting a scan of millions of entries
+        // took seconds and moved every crumb out from under the selection.
         if let Some(tree) = &self.tree {
-            let mut tree = (**tree).clone();
-            disktree_core::tree::aggregate(&mut tree, self.options.metric);
-            self.tree = Some(Arc::new(tree));
             let metric = self.options.metric;
-            self.marks.refresh(
-                &self.root_path,
-                self.tree.as_ref().unwrap(),
-                metric,
-            );
+            self.marks.refresh(&self.root_path, tree, metric);
         }
-        // Children are ordered by the metric, so every crumb moved.
-        self.refresh_insights();
-        self.clear_filter();
         self.cache = None;
         cx.notify();
     }
@@ -1966,6 +1977,17 @@ impl Disktree {
         // The alert dialog owns Enter and Escape while it is open; a key that
         // bubbles up to here must not also act on the screen behind it.
         if self.confirm_open {
+            return;
+        }
+
+        // Command-letter belongs to the menu bar (Cmd-Q, Cmd-W, Cmd-H), never
+        // to the bare letter: Cmd-C must not open the review screen, nor
+        // Cmd-R start a rescan. Cmd-F is the one the platform expects here.
+        if event.keystroke.modifiers.platform {
+            if key == "f" && self.screen == Screen::Explore {
+                self.find_open = true;
+                cx.notify();
+            }
             return;
         }
 
