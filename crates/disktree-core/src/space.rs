@@ -70,7 +70,7 @@ pub fn space_info(path: &Path) -> io::Result<SpaceInfo> {
 /// `/dev/nvme0n1p2`: the mount with the longest prefix of `path` in
 /// `/proc/self/mounts`. `None` where that table cannot be read.
 pub fn device_for(path: &Path) -> Option<String> {
-    let table = std::fs::read_to_string("/proc/self/mounts").ok()?;
+    let table = mount_table()?;
     let path = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
     device_in(&table, &path)
 }
@@ -101,13 +101,63 @@ pub struct Mount {
     pub options: String,
 }
 
+/// This machine's mount table in `/proc/self/mounts` form, or `None` where
+/// it cannot be read.
+fn mount_table() -> Option<String> {
+    if cfg!(target_os = "macos") {
+        // macOS has no /proc; `mount` lists the same table. Running it is
+        // cheap and needs no unsafe `getmntinfo` binding.
+        let output = std::process::Command::new("/sbin/mount").output().ok()?;
+        output
+            .status
+            .success()
+            .then(|| from_bsd_mount(&String::from_utf8_lossy(&output.stdout)))
+    } else {
+        std::fs::read_to_string("/proc/self/mounts").ok()
+    }
+}
+
+/// Rewrite BSD `mount` output — `source on /point (fstype, opt, opt)` — as
+/// `/proc/self/mounts` lines, escaping spaces the way Linux does, so one
+/// parser serves both.
+pub fn from_bsd_mount(output: &str) -> String {
+    use std::fmt::Write as _;
+    let mut table = String::new();
+    for line in output.lines() {
+        let Some((head, rest)) = line.rsplit_once(" (") else {
+            continue;
+        };
+        let Some((source, point)) = head.split_once(" on ") else {
+            continue;
+        };
+        let mut options = rest.trim_end_matches(')').split(", ");
+        let fstype = options.next().unwrap_or("unknown");
+        let options: Vec<&str> = options.collect();
+        let escape = |field: &str| field.replace(' ', "\\040");
+        // Writing to a String cannot fail.
+        let _ = writeln!(
+            table,
+            "{} {} {} {} 0 0",
+            escape(source),
+            escape(point),
+            fstype,
+            if options.is_empty() {
+                "rw".to_string()
+            } else {
+                options.join(",").replace(' ', "_")
+            },
+        );
+    }
+    table
+}
+
 /// Parse `/proc/self/mounts`.
 pub fn parse_mounts(table: &str) -> Vec<Mount> {
     table
         .lines()
         .filter_map(|line| {
             let mut fields = line.split_whitespace();
-            let source = fields.next()?.to_string();
+            let source = fields.next()?.replace("\\040", " ");
             // Spaces in mount points are escaped as \040.
             let point = PathBuf::from(fields.next()?.replace("\\040", " "));
             let fstype = fields.next()?.to_string();
@@ -187,7 +237,7 @@ pub fn volume_root(mounts: &[Mount], path: &Path) -> Option<PathBuf> {
 
 /// [`volume_root`] for this machine.
 pub fn volume_root_for(path: &Path) -> Option<PathBuf> {
-    let table = std::fs::read_to_string("/proc/self/mounts").ok()?;
+    let table = mount_table()?;
     let path = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
     volume_root(&parse_mounts(&table), &path)
 }
@@ -195,13 +245,49 @@ pub fn volume_root_for(path: &Path) -> Option<PathBuf> {
 /// [`foreign_mounts`] for this machine; `None` when the mount table cannot
 /// be read, so the caller can fall back to comparing devices.
 pub fn foreign_mounts_for(root: &Path) -> Option<Vec<PathBuf>> {
-    let table = std::fs::read_to_string("/proc/self/mounts").ok()?;
+    let table = mount_table()?;
     Some(foreign_mounts(&parse_mounts(&table), root))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const MACOS: &str = "\
+/dev/disk3s1s1 on / (apfs, sealed, local, read-only, journaled)
+devfs on /dev (devfs, local, nobrowse)
+/dev/disk3s6 on /System/Volumes/VM (apfs, local, noexec, journaled, noatime, nobrowse)
+/dev/disk3s5 on /System/Volumes/Data (apfs, local, journaled, nobrowse, protect, root data)
+map auto_home on /System/Volumes/Data/home (autofs, automounted, nobrowse)
+/dev/disk5s1 on /Volumes/My Passport (exfat, local, nodev, nosuid, noowners)
+";
+
+    #[test]
+    fn a_macos_mount_table_parses_like_linux() {
+        let mounts = parse_mounts(&from_bsd_mount(MACOS));
+        assert_eq!(mounts.len(), 6);
+        assert_eq!(mounts[0].point, PathBuf::from("/"));
+        assert_eq!(mounts[0].fstype, "apfs");
+        assert_eq!(mounts[4].source, "map auto_home");
+        assert_eq!(mounts[5].point, PathBuf::from("/Volumes/My Passport"));
+        assert_eq!(mounts[5].fstype, "exfat");
+    }
+
+    #[test]
+    fn a_macos_disk_scan_skips_the_data_volume_it_already_sees_as_users() {
+        let mounts = parse_mounts(&from_bsd_mount(MACOS));
+        let home = Path::new("/Users/someone");
+        assert_eq!(volume_root(&mounts, home), Some(PathBuf::from("/")));
+        let foreign = foreign_mounts(&mounts, Path::new("/"));
+        for point in [
+            "/dev",
+            "/System/Volumes/VM",
+            "/System/Volumes/Data",
+            "/Volumes/My Passport",
+        ] {
+            assert!(foreign.contains(&PathBuf::from(point)), "{point}");
+        }
+    }
 
     const OMARCHY: &str = "\
 sys /sys sysfs rw 0 0

@@ -10,7 +10,8 @@
 //!   standard library rather than by shelling out, so no path ever reaches a
 //!   shell and no filename can be misread as an option.
 //! * [`RemovalMode::Trash`] — move to the desktop trash, using `trash-put`,
-//!   then `gio trash`, then a built-in XDG implementation. The backend is
+//!   then `gio trash`, then a built-in XDG implementation; on macOS the
+//!   system's own `trash`, so items land in the Finder trash. The backend is
 //!   detected once and named in the UI so the user knows what actually happens.
 
 use std::fs;
@@ -152,16 +153,63 @@ const SYSTEM_TREES: [&str; 14] = [
     "/efi",
 ];
 
+/// macOS's own trees, on top of [`SYSTEM_TREES`]. `/System` also covers
+/// `/System/Volumes/Data`, the second path to every user file: marking
+/// through it would slip past the home-directory checks. `/private` holds
+/// the real `/etc` and `/var`; `/opt/homebrew` belongs to Homebrew, whose
+/// `brew cleanup` is the right tool.
+const MACOS_SYSTEM_TREES: [&str; 4] =
+    ["/System", "/Library", "/private", "/opt/homebrew"];
+
+/// Directories in a macOS home that are never removed whole, and trees
+/// never removed at all: the keychains, and the synced folders, where a
+/// deletion reaches every device and frees nothing for a file that only
+/// lives in the cloud.
+const MACOS_HOME_KEEP: [&str; 3] =
+    ["Library", "Library/Containers", "Library/Group Containers"];
+const MACOS_HOME_TREES: [&str; 3] = [
+    "Library/Keychains",
+    "Library/Mobile Documents",
+    "Library/CloudStorage",
+];
+
 /// The system tree `path` is in, if any. The home directory is never
 /// system, wherever it lives.
 fn system_tree(path: &Path, home: Option<&Path>) -> Option<&'static str> {
     if home.is_some_and(|home| path.starts_with(normalize(home))) {
         return None;
     }
+    let macos: &[&'static str] = if cfg!(target_os = "macos") {
+        &MACOS_SYSTEM_TREES
+    } else {
+        &[]
+    };
     SYSTEM_TREES
         .iter()
+        .chain(macos)
         .find(|tree| path.starts_with(tree))
         .copied()
+}
+
+/// Why a path inside a macOS home must stay, if it must.
+fn protected_in_home(path: &Path, home: &Path) -> Option<String> {
+    if !cfg!(target_os = "macos") {
+        return None;
+    }
+    let relative = path.strip_prefix(home).ok()?;
+    if MACOS_HOME_KEEP
+        .iter()
+        .any(|keep| relative == Path::new(keep))
+    {
+        return Some(format!(
+            "~/{} holds every app's settings: mark what is inside instead",
+            relative.display()
+        ));
+    }
+    MACOS_HOME_TREES
+        .iter()
+        .find(|tree| relative.starts_with(tree))
+        .map(|tree| format!("~/{tree} is protected: use Finder or the app"))
 }
 
 fn refuse(path: &Path, root: &Path, home: Option<&Path>) -> Option<String> {
@@ -176,6 +224,11 @@ fn refuse(path: &Path, root: &Path, home: Option<&Path>) -> Option<String> {
     }
     if !path.starts_with(root) {
         return Some("outside the scanned root".into());
+    }
+    if let Some(reason) =
+        home.and_then(|home| protected_in_home(path, &normalize(home)))
+    {
+        return Some(reason);
     }
     if let Some(system) = system_tree(path, home) {
         return Some(format!(
@@ -250,6 +303,8 @@ pub fn normalize(path: &Path) -> PathBuf {
 /// Which tool, if any, moves files to the desktop trash.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum TrashBackend {
+    /// `/usr/bin/trash`, built into macOS 15 and later: the Finder trash.
+    MacOs,
     /// `trash-put` from trash-cli.
     TrashPut,
     /// `gio trash`, present anywhere `GLib` is installed.
@@ -264,13 +319,14 @@ pub enum TrashBackend {
 impl TrashBackend {
     pub const fn is_available(self) -> bool {
         match self {
-            Self::TrashPut | Self::Gio | Self::XdgHome => true,
+            Self::MacOs | Self::TrashPut | Self::Gio | Self::XdgHome => true,
             Self::Unavailable => false,
         }
     }
 
     pub const fn label(self) -> &'static str {
         match self {
+            Self::MacOs => "macOS trash",
             Self::TrashPut => "trash-put",
             Self::Gio => "gio trash",
             Self::XdgHome => "XDG trash",
@@ -280,6 +336,7 @@ impl TrashBackend {
 
     pub const fn detail(self) -> &'static str {
         match self {
+            Self::MacOs => "moves into the Finder trash, restorable from there",
             Self::TrashPut => {
                 "uses trash-cli, the same trash as your file manager"
             }
@@ -288,7 +345,7 @@ impl TrashBackend {
                 "moves into ~/.local/share/Trash on the same volume"
             }
             Self::Unavailable => {
-                "install trash-cli or keep deleting permanently"
+                "needs macOS 15 or trash-cli; or delete permanently"
             }
         }
     }
@@ -296,7 +353,15 @@ impl TrashBackend {
 
 /// Detect the best available trash backend for this machine.
 pub fn detect_trash_backend() -> TrashBackend {
-    if which("trash-put") {
+    // On macOS the XDG layouts are the wrong trash: the Finder never looks
+    // there, so nothing would ever be emptied.
+    if cfg!(target_os = "macos") {
+        if Path::new(MACOS_TRASH).is_file() {
+            TrashBackend::MacOs
+        } else {
+            TrashBackend::Unavailable
+        }
+    } else if which("trash-put") {
         TrashBackend::TrashPut
     } else if which("gio") {
         TrashBackend::Gio
@@ -306,6 +371,8 @@ pub fn detect_trash_backend() -> TrashBackend {
         TrashBackend::Unavailable
     }
 }
+
+const MACOS_TRASH: &str = "/usr/bin/trash";
 
 fn which(program: &str) -> bool {
     let Some(path) = std::env::var_os("PATH") else {
@@ -453,6 +520,7 @@ pub fn remove_permanently(path: &Path) -> io::Result<()> {
 /// Move one path to the desktop trash.
 pub fn move_to_trash(path: &Path, backend: TrashBackend) -> io::Result<()> {
     match backend {
+        TrashBackend::MacOs => run_macos_trash(path),
         TrashBackend::TrashPut => run_tool(Path::new("trash-put"), &[], path),
         TrashBackend::Gio => run_tool(Path::new("gio"), &["trash"], path),
         TrashBackend::XdgHome => trash_via_xdg(path),
@@ -482,6 +550,19 @@ fn run_tool(program: &Path, arguments: &[&str], path: &Path) -> io::Result<()> {
             program.display(),
             stderr.trim()
         )))
+    }
+}
+
+/// macOS's `trash` does not understand `--`, so the path is made absolute
+/// instead: a name that starts with `/` can never be read as an option.
+fn run_macos_trash(path: &Path) -> io::Result<()> {
+    let path = std::path::absolute(path)?;
+    let output = Command::new(MACOS_TRASH).arg(&path).output()?;
+    if output.status.success() {
+        Ok(())
+    } else {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        Err(io::Error::other(format!("trash failed: {}", stderr.trim())))
     }
 }
 
@@ -726,6 +807,68 @@ mod tests {
         assert_eq!(percent_encode("/a/b-c.d_e~f"), "/a/b-c.d_e~f");
         assert_eq!(percent_encode("/a/néw"), "/a/n%C3%A9w");
         assert_eq!(percent_encode("/a\nb"), "/a%0Ab");
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn the_macos_trash_takes_a_name_that_looks_like_an_option() {
+        let temp = tree();
+        let target = temp.path().join("-rf");
+        fs::write(&target, b"x").unwrap();
+        move_to_trash(&target, TrashBackend::MacOs).unwrap();
+        assert!(!target.exists());
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_system_and_firmlinked_paths_are_refused() {
+        let home = Path::new("/Users/someone");
+        let root = Path::new("/");
+        for path in [
+            "/System/Library/Fonts",
+            "/System/Volumes/Data/Users/someone/Documents",
+            "/Library/Application Support",
+            "/private/var/db",
+            "/opt/homebrew/Cellar",
+            "/usr/local/bin",
+        ] {
+            assert!(
+                refuse(Path::new(path), root, Some(home)).is_some(),
+                "{path} should be refused"
+            );
+        }
+        assert!(
+            refuse(Path::new("/Applications/Big.app"), root, Some(home))
+                .is_none()
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_home_keeps_its_library_keychains_and_cloud_folders() {
+        let home = Path::new("/Users/someone");
+        for path in [
+            "/Users/someone/Library",
+            "/Users/someone/Library/Containers",
+            "/Users/someone/Library/Keychains/login.keychain-db",
+            "/Users/someone/Library/Mobile Documents/com~apple~CloudDocs",
+            "/Users/someone/Library/CloudStorage/GoogleDrive",
+        ] {
+            assert!(
+                refuse(Path::new(path), home, Some(home)).is_some(),
+                "{path} should be refused"
+            );
+        }
+        for path in [
+            "/Users/someone/Library/Caches",
+            "/Users/someone/Library/Containers/com.example.app",
+            "/Users/someone/Library/Developer/Xcode/DerivedData",
+        ] {
+            assert!(
+                refuse(Path::new(path), home, Some(home)).is_none(),
+                "{path} should be allowed"
+            );
+        }
     }
 
     #[test]
