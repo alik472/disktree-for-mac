@@ -18,7 +18,7 @@ TARGET = target/release/disktree
 ICON = assets/disktree.svg
 DESKTOP = packaging/disktree.desktop.in
 
-.PHONY: help build run install uninstall lint test ci fmt clean
+.PHONY: help build run install uninstall lint test ci fmt clean app install-app perf
 
 help:
 	@echo "disktree"
@@ -32,6 +32,11 @@ help:
 	@echo "  make ci          lint, then test"
 	@echo "  make fmt         format in place"
 	@echo "  make clean       cargo clean"
+	@echo
+	@echo "  macOS:"
+	@echo "  make app         build target/release/disktree.app"
+	@echo "  make install-app copy disktree.app into /Applications"
+	@echo "  make perf        timing budgets on a 4M-entry tree and a real scan"
 
 # Always ask cargo: it is incremental and knows every source file, where a
 # make file-target would only compare the binary against the manifest and
@@ -84,3 +89,21 @@ uninstall:
 
 clean:
 	$(CARGO) clean
+
+# ── macOS ───────────────────────────────────────────────────────────────
+
+APPLICATIONS ?= /Applications
+
+app: build
+	packaging/macos/bundle.sh
+
+install-app: app
+	rm -rf "$(APPLICATIONS)/disktree.app"
+	ditto target/release/disktree.app "$(APPLICATIONS)/disktree.app"
+	@echo "installed $(APPLICATIONS)/disktree.app"
+
+# Release builds only: debug timings say nothing about the app. The real
+# scan reads DISKTREE_PERF_ROOT, or the home directory.
+perf:
+	$(CARGO) test --release -p disktree-core --test perf -- --ignored --nocapture
+	$(CARGO) test --release -p disktree-app responsive -- --ignored --nocapture

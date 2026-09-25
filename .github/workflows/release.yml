@@ -86,3 +86,40 @@ jobs:
             gh release create "$TAG" "$ARCHIVE" "$ARCHIVE.sha256" \
               --title "disktree ${TAG#v}" --generate-notes
           fi
+
+  macos:
+    name: Build and publish (macOS)
+    needs: release
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.97"
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Test
+        run: cargo xtask test
+
+      - name: Package
+        id: package
+        run: |
+          version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+          make app
+          name="disktree-$version-macos-arm64"
+          mkdir -p dist
+          ditto -c -k --keepParent target/release/disktree.app "dist/$name.zip"
+          (cd dist && shasum -a 256 "$name.zip" > "$name.zip.sha256")
+          echo "name=$name" >> "$GITHUB_OUTPUT"
+
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.tag || github.ref_name }}
+        run: |
+          gh release upload "$TAG" "dist/${{ steps.package.outputs.name }}.zip" \
+            "dist/${{ steps.package.outputs.name }}.zip.sha256" --clobber

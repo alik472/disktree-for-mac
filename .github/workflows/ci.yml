@@ -43,3 +43,26 @@ jobs:
 
       - name: Test
         run: cargo xtask test
+
+  macos:
+    name: Lint and test (macOS)
+    # Apple silicon; GPUI's Metal shaders compile with the runner's Xcode.
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.97"
+          components: clippy, rustfmt
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Lint
+        run: cargo xtask lint
+
+      - name: Test
+        run: cargo xtask test
+
+      - name: Bundle
+        run: make app

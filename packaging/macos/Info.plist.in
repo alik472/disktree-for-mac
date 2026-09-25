@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleName</key>
+	<string>disktree</string>
+	<key>CFBundleDisplayName</key>
+	<string>disktree</string>
+	<key>CFBundleIdentifier</key>
+	<string>com.github.alik472.disktree</string>
+	<key>CFBundleVersion</key>
+	<string>@VERSION@</string>
+	<key>CFBundleShortVersionString</key>
+	<string>@VERSION@</string>
+	<key>CFBundleExecutable</key>
+	<string>disktree</string>
+	<key>CFBundleIconFile</key>
+	<string>disktree</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<key>LSMinimumSystemVersion</key>
+	<string>15.0</string>
+	<key>NSAppSleepDisabled</key>
+	<true/>
+	<key>NSHighResolutionCapable</key>
+	<true/>
+	<key>LSApplicationCategoryType</key>
+	<string>public.app-category.utilities</string>
+	<key>NSHumanReadableCopyright</key>
+	<string>MIT licensed. Original disktree by Tobi Lütke.</string>
+</dict>
+</plist>

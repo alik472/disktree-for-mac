@@ -1,47 +1,73 @@
-# disktree
+# Disktree for Mac
+
+<img src="assets/disktree-macos.png" alt="disktree icon" width="128" align="right">
+
+A native macOS build of [disktree](https://github.com/tobi/disktree) by
+Tobi Lütke: find what is filling your disk, mark what should go, and move
+it to the Trash — with the volume's free space in view the whole time.
 
 ![disktree: a home directory as a treemap, coloured by kind of data, with reclaimable space hatched and the selection, findings and free space in the side panel](assets/screenshot.png)
 
-Find what is filling a disk, mark what should go, and remove it — with the
-volume's free space in view the whole time.
+disktree scans your home folder, draws every directory as a nested mosaic
+sized by what it really costs on disk, and lets you walk into it with the
+keyboard or the mouse. Mark as much as you like; nothing happens until you
+review the list and commit, and permanent deletion always asks first.
 
-disktree is a treemap for Omarchy. It scans your home directory by default,
-draws every directory as a nested mosaic sized by what it really costs on disk,
-and lets you walk into it with the keyboard or the mouse. Mark as much as you
-like; nothing happens until you review the list and commit, and the permanent
-path always asks first.
-
-Built with [GPUI](https://gpui-kit.com/) through
-[gpui-omarchy](https://github.com/huacnlee/gpui-omarchy), so it follows your
-Omarchy theme and behaves like the rest of the desktop.
+This fork keeps upstream's app intact and adds what it takes to be a good Mac
+citizen, plus the fixes found testing it on a real 4-million-file home
+folder (see [What this fork changes](#what-this-fork-changes)).
 
 ## Install
 
-Download `disktree-*-x86_64-linux.tar.gz` from the
-[latest release](https://github.com/tobi/disktree/releases/latest), unpack
-it, and run `./install.sh` inside (or just copy `disktree` onto your
-`PATH`). Or build it:
+**Download:** grab `disktree-*-macos-arm64.zip` from the
+[latest release](https://github.com/alik472/disktree-for-mac/releases/latest),
+unzip it and drag `disktree.app` into Applications. The app is ad-hoc signed,
+not notarized, so the first time right-click it → **Open** (or run
+`xattr -dr com.apple.quarantine /Applications/disktree.app`).
+
+**Build it** (Apple silicon or Intel, macOS 15+, Xcode for the Metal
+compiler, Rust 1.97+):
 
 ```sh
-git clone https://github.com/tobi/disktree
-cd disktree
-make install
+git clone https://github.com/alik472/disktree-for-mac
+cd disktree-for-mac
+make install-app          # builds disktree.app and copies it to /Applications
 ```
 
-`make install` builds a release binary and puts three things under `~/.local`
-(no root needed):
+`make app` only builds `target/release/disktree.app`. The command line works
+too: `target/release/disktree ~/src`.
 
-- `~/.local/bin/disktree`
-- a desktop entry, so disktree is in the launcher and in a file manager's
-  **Open with** for a directory (it adds a handler; it never becomes the
-  default)
-- an icon
+**Give it Full Disk Access** (System Settings → Privacy & Security → Full
+Disk Access → add disktree) to measure Mail, Messages, Safari and the other
+folders macOS protects. Without it they are counted as *unreadable* in the
+status line, and macOS asks once each for Desktop, Documents and Downloads.
 
-`sudo make install PREFIX=/usr/local` installs system-wide; `make uninstall`
-removes exactly what was installed.
+## What this fork changes
 
-You need Rust 1.97 or newer and a Wayland or X11 session with a GPU that GPUI
-can drive (Vulkan).
+- **Mac app:** an `.app` bundle with its own icon, a menu bar with Hide and
+  Quit, ⌘Q / ⌘W / ⌘H, ⌘F for the filter, and quitting when the window
+  closes. ⌘-letter never triggers the bare-letter action (upstream, ⌘C opened
+  the review screen and ⌘R rescanned).
+- **Trash:** items go to the Finder Trash through macOS's own `trash`
+  command, restorable from there. Upstream's Linux fallbacks would have
+  moved them to a hidden `~/.local/share/Trash` that nothing ever empties.
+- **Safety on macOS:** refuses `/System` (which also covers
+  `/System/Volumes/Data`, the second path to every file in your home),
+  `/Library`, `/private`, `/opt/homebrew`, `~/Library` itself, the
+  keychains, and iCloud / cloud-storage folders, where a deletion would
+  reach every device and free nothing.
+- **Whole disk (`--disk`, `g`):** reads the macOS mount table, so the scan
+  of `/` skips `/System/Volumes/Data` and other volumes instead of counting
+  your data twice.
+- **No freeze on Size ↔ Files:** switching metric used to copy and re-sort
+  the entire tree on the UI thread — 45 seconds on a 4M-file home folder.
+  It is now instant: nodes keep both totals and everything that ranks
+  children ranks them itself. Replaced trees are freed off the UI thread.
+- **Keeps scanning in the background:** App Nap is off, so a scan does not
+  slow down when the window is behind others.
+- **Performance tests:** `make perf` checks frame budgets on a synthetic
+  4M-entry tree and on a real scan through the window harness. See
+  [TESTING.md](TESTING.md).
 
 ## Use
 
@@ -216,6 +242,8 @@ make run      # release build, scanning $HOME
 make lint     # rustfmt --check, then clippy with every warning an error
 make test     # scanner, layout and removal tests, plus window-harness tests
 make ci       # lint, then test
+make app      # macOS: target/release/disktree.app
+make perf     # timing budgets: 4M-entry synthetic tree, then a real scan
 ```
 
 The lint gate is strict on purpose: `clippy::all` and `clippy::pedantic` are
@@ -233,6 +261,8 @@ gone while their neighbours are not.
 | `crates/disktree-app/src/ui.rs` | the spacing, type and size scale, in `rem` |
 | `crates/disktree-app/src/tests.rs` | end-to-end tests through a real window |
 | `packaging/`, `assets/`, `Makefile` | the desktop entry, the icon, and install |
+| `packaging/macos` | `Info.plist`, the `.app` bundler, the icon and the script that draws it |
+| `crates/disktree-core/tests/perf.rs` | performance budgets on a 4M-entry tree and a real scan |
 
 The interface follows the
 [GPUI Kit design guides](https://gpui-kit.com/versions/main/docs/design-guides/):
@@ -242,4 +272,5 @@ the one it cannot take back.
 
 ## License
 
-MIT
+MIT. disktree is by [Tobi Lütke](https://github.com/tobi/disktree); the
+macOS port is by [alik472](https://github.com/alik472).
